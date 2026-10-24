@@ -1,10 +1,13 @@
 import base64
+import logging
 import re
 from dataclasses import dataclass
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,6 +24,7 @@ YANDEX_OCR_URL = "https://ai.api.cloud.yandex.net/ocr/v1/recognizeText"
 class YandexVisionOCR:
     async def recognize(self, image_bytes: bytes) -> OCRResult:
         if not settings.yandex_api_key or not settings.yandex_folder_id:
+            logger.error("ocr_configuration_missing")
             return OCRResult(
                 value=None,
                 confidence=0.0,
@@ -51,30 +55,54 @@ class YandexVisionOCR:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:
+            logger.error(
+                "ocr_http_error",
+                extra={
+                    "status_code": exc.response.status_code,
+                    "provider": "yandex_vision",
+                },
+            )
             return OCRResult(
                 value=None,
                 confidence=0.0,
                 raw_text="",
                 error=f"Ошибка Yandex Vision: {exc.response.status_code}",
             )
-        except Exception as exc:
+        except Exception:
+            logger.exception("ocr_request_failed")
             return OCRResult(
                 value=None,
                 confidence=0.0,
                 raw_text="",
-                error=f"Ошибка запроса к OCR: {exc}",
+                error="Ошибка запроса к OCR",
             )
 
         raw_text = self._extract_text(data)
         value, confidence = self._extract_meter_value(raw_text)
 
         if value is None:
+            logger.warning(
+                "ocr_value_not_found",
+                extra={
+                    "provider": "yandex_vision",
+                    "confidence": confidence,
+                },
+            )
             return OCRResult(
                 value=None,
                 confidence=confidence,
                 raw_text=raw_text,
                 error="Не удалось распознать показание",
             )
+
+        logger.info(
+            "ocr_recognized",
+            extra={
+                "provider": "yandex_vision",
+                "confidence": confidence,
+                "value": value,
+            },
+        )
 
         return OCRResult(
             value=value,
@@ -99,8 +127,7 @@ class YandexVisionOCR:
         candidates = re.findall(r"\b\d{1,6}[.,]\d{3}\b", raw_text)
 
         if candidates:
-            value = float(candidates[-1].replace(",", "."))
-            return value, 0.85
+            return float(candidates[-1].replace(",", ".")), 0.85
 
         digits = re.findall(r"\d+", raw_text)
         joined = "".join(digits)
@@ -115,20 +142,3 @@ class YandexVisionOCR:
                 pass
 
         return None, 0.0
-
-
-class StubOCRProvider:
-    async def recognize(self, image_bytes: bytes) -> OCRResult:
-        return OCRResult(
-            value=None,
-            confidence=0.0,
-            raw_text="",
-            error="OCR-провайдер не настроен",
-        )
-
-
-def get_ocr_provider():
-    if settings.ocr_provider == "yandex":
-        return YandexVisionOCR()
-
-    return StubOCRProvider()
